@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v0.26.1
 	github.com/charmbracelet/lipgloss v0.10.0
 	github.com/itchyny/gojq v0.12.15
+	github.com/mattn/go-sqlite3 v1.14.29
 	github.com/muesli/termenv v0.15.2
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
 	github.com/spf13/cobra v1.8.0
