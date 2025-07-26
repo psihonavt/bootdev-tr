@@ -55,6 +55,42 @@ func InitializeDatabase(config DBConfig) (*sql.DB, error) {
 	return db, nil
 }
 
+// ResetDatabase drops all tables and recreates them with fresh data
+func ResetDatabase(config DBConfig) error {
+	// Open database connection
+	db, err := sql.Open("sqlite3", config.DBPath+"?_foreign_keys=on")
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	// Drop all tables
+	dropQueries := []string{
+		"DROP TABLE IF EXISTS user_answers",
+		"DROP TABLE IF EXISTS questions", 
+		"DROP TABLE IF EXISTS quizzes",
+		"DROP TABLE IF EXISTS question_types",
+	}
+
+	for _, query := range dropQueries {
+		if _, err := db.Exec(query); err != nil {
+			return fmt.Errorf("failed to drop table: %w", err)
+		}
+	}
+
+	// Recreate schema
+	if err := initializeSchema(db, config.InitFile); err != nil {
+		return fmt.Errorf("failed to recreate schema: %w", err)
+	}
+
+	return nil
+}
+
 // isDatabaseEmpty checks if the database has any tables
 func isDatabaseEmpty(db *sql.DB) bool {
 	var count int
@@ -84,20 +120,6 @@ func initializeSchema(db *sql.DB, initFile string) error {
 
 // Helper functions for basic operations
 
-// CreateCourse creates a new course
-func CreateCourse(db *sql.DB, uuid, title, slug string) error {
-	query := `INSERT INTO courses (uuid, title, slug) VALUES (?, ?, ?)`
-	_, err := db.Exec(query, uuid, title, slug)
-	return err
-}
-
-// CreateLesson creates a new lesson
-func CreateLesson(db *sql.DB, uuid, courseUUID, title, slug, content string) error {
-	query := `INSERT INTO lessons (uuid, course_uuid, title, slug, content) VALUES (?, ?, ?, ?, ?)`
-	_, err := db.Exec(query, uuid, courseUUID, title, slug, content)
-	return err
-}
-
 // CreateQuiz creates a quiz for a course
 func CreateQuiz(db *sql.DB, courseUUID string) (int64, error) {
 	query := `INSERT INTO quizzes (course_uuid) VALUES (?)`
@@ -125,27 +147,100 @@ func RecordUserAnswer(db *sql.DB, questionID int64, userAnswer string, isCorrect
 	return err
 }
 
-// Example usage
-func main() {
-	config := DBConfig{
-		DBPath:   "./data/quiz.db",
-		InitFile: "./init.sql",
-	}
+// QuizStats holds statistics for a specific quiz/course
+type QuizStats struct {
+	CourseUUID      string
+	QuestionCount   int
+	TotalAnswers    int
+	CorrectAnswers  int
+	CorrectnessRate float64
+}
 
-	db, err := InitializeDatabase(config)
+// GetQuizStats retrieves statistics for all quizzes
+func GetQuizStats(db *sql.DB) ([]QuizStats, error) {
+	query := `
+		SELECT 
+			qz.course_uuid,
+			COUNT(DISTINCT q.id) as question_count,
+			COUNT(ua.id) as total_answers,
+			SUM(CASE WHEN ua.is_correct = 1 THEN 1 ELSE 0 END) as correct_answers
+		FROM quizzes qz
+		LEFT JOIN questions q ON qz.id = q.quiz_id
+		LEFT JOIN user_answers ua ON q.id = ua.question_id
+		GROUP BY qz.course_uuid
+		ORDER BY qz.course_uuid
+	`
+
+	rows, err := db.Query(query)
 	if err != nil {
-		fmt.Printf("Error initializing database: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("error querying quiz stats: %w", err)
 	}
-	defer db.Close()
+	defer rows.Close()
 
-	// Verify initialization
-	var courseCount int
-	err = db.QueryRow("SELECT COUNT(*) FROM courses").Scan(&courseCount)
+	var stats []QuizStats
+	for rows.Next() {
+		var stat QuizStats
+		err := rows.Scan(&stat.CourseUUID, &stat.QuestionCount, &stat.TotalAnswers, &stat.CorrectAnswers)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning quiz stats: %w", err)
+		}
+
+		if stat.TotalAnswers > 0 {
+			stat.CorrectnessRate = float64(stat.CorrectAnswers) / float64(stat.TotalAnswers) * 100
+		}
+
+		stats = append(stats, stat)
+	}
+
+	return stats, nil
+}
+
+// Question represents a quiz question
+type Question struct {
+	ID            int64
+	QuizID        int64
+	QuestionType  string
+	QuestionText  string
+	Explanation   string
+	AnswerChoices string
+	CorrectAnswer string
+}
+
+// GetNextMultipleChoiceQuestion gets the next unanswered multiple choice question for a course
+func GetNextMultipleChoiceQuestion(db *sql.DB, courseUUID string) (*Question, error) {
+	query := `
+		SELECT q.id, q.quiz_id, qt.name, q.question_text, q.explanation, q.answer_choices, q.correct_answer
+		FROM questions q
+		JOIN quizzes qz ON q.quiz_id = qz.id
+		JOIN question_types qt ON q.question_type_id = qt.id
+		WHERE qz.course_uuid = ? 
+		  AND qt.name = 'multiple_choice'
+		  AND q.id NOT IN (
+			  SELECT question_id FROM user_answers WHERE question_id = q.id
+		  )
+		ORDER BY q.id ASC
+		LIMIT 1
+	`
+
+	row := db.QueryRow(query, courseUUID)
+	
+	var question Question
+	err := row.Scan(
+		&question.ID,
+		&question.QuizID,
+		&question.QuestionType,
+		&question.QuestionText,
+		&question.Explanation,
+		&question.AnswerChoices,
+		&question.CorrectAnswer,
+	)
+	
+	if err == sql.ErrNoRows {
+		return nil, nil // No more questions
+	}
 	if err != nil {
-		fmt.Printf("Error querying courses: %v\n", err)
-		return
+		return nil, fmt.Errorf("error getting next question: %w", err)
 	}
 
-	fmt.Printf("Database ready! Found %d courses.\n", courseCount)
+	return &question, nil
 }
