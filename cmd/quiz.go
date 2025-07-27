@@ -1,15 +1,14 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	api "github.com/bootdotdev/bootdev/client"
 	dao "github.com/bootdotdev/bootdev/db"
+	render "github.com/bootdotdev/bootdev/render"
 )
 
 func getCourseContent(uuid string) {
@@ -92,78 +91,12 @@ func startQuiz(courseUUID string) {
 	}
 	defer db.Close()
 
-	// Get next unanswered multiple choice question
-	question, err := dao.GetNextMultipleChoiceQuestion(db, courseUUID)
+	quiz, err := dao.GetQuiz(db, courseUUID)
 	if err != nil {
-		fmt.Printf("Error getting question: %v\n", err)
-		return
+		fmt.Printf("Error getting quiz: %w", err)
+		os.Exit(1)
 	}
-	if question == nil {
-		fmt.Println("No more questions available for this course!")
-		return
-	}
-
-	// Parse answer choices
-	var choices []string
-	err = json.Unmarshal([]byte(question.AnswerChoices), &choices)
-	if err != nil {
-		fmt.Printf("Error parsing answer choices: %v\n", err)
-		return
-	}
-
-	// Display question
-	fmt.Printf("\n%s\n\n", question.QuestionText)
-	for i, choice := range choices {
-		fmt.Printf("%d. %s\n", i+1, choice)
-	}
-
-	// Get user input
-	fmt.Print("\nSelect your answer (1-4): ")
-	var input string
-	fmt.Scanln(&input)
-
-	// Validate input
-	choiceNum, err := strconv.Atoi(input)
-	if err != nil || choiceNum < 1 || choiceNum > len(choices) {
-		fmt.Println("Invalid choice. Please enter a number between 1 and", len(choices))
-		return
-	}
-
-	selectedAnswer := choices[choiceNum-1]
-	isCorrect := strings.TrimSpace(selectedAnswer) == strings.TrimSpace(question.CorrectAnswer)
-
-	// Record answer
-	err = dao.RecordUserAnswer(db, question.ID, selectedAnswer, isCorrect)
-	if err != nil {
-		fmt.Printf("Error recording answer: %v\n", err)
-		return
-	}
-
-	// Show feedback
-	fmt.Printf("\n")
-	for i, choice := range choices {
-		if i == choiceNum-1 {
-			if isCorrect {
-				fmt.Printf("%d. %s ✅\n", i+1, choice)
-			} else {
-				fmt.Printf("%d. %s ❌\n", i+1, choice)
-			}
-		} else if strings.TrimSpace(choice) == strings.TrimSpace(question.CorrectAnswer) {
-			fmt.Printf("%d. %s ✅\n", i+1, choice)
-		} else {
-			fmt.Printf("%d. %s\n", i+1, choice)
-		}
-	}
-
-	if isCorrect {
-		fmt.Printf("\nCorrect! 🎉\n")
-	} else {
-		fmt.Printf("\nIncorrect. The correct answer was: %s\n", question.CorrectAnswer)
-	}
-
-	if question.Explanation != "" {
-		fmt.Printf("\nExplanation: %s\n", question.Explanation)
-	}
+	render.RenderQuiz(quiz)
 }
 
 func init() {

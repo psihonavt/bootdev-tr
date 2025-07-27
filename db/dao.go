@@ -2,9 +2,12 @@ package dao
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -13,6 +16,18 @@ import (
 type DBConfig struct {
 	DBPath   string
 	InitFile string
+}
+
+func getDefaultDB() *sql.DB {
+	config := DBConfig{
+		DBPath:   "data/bootdev.db",
+		InitFile: "init.sql",
+	}
+	db, err := InitializeDatabase(config)
+	if err != nil {
+		panic(err)
+	}
+	return db
 }
 
 // InitializeDatabase creates and initializes the SQLite database if it doesn't exist
@@ -47,11 +62,7 @@ func InitializeDatabase(config DBConfig) (*sql.DB, error) {
 			db.Close()
 			return nil, fmt.Errorf("failed to initialize database schema: %w", err)
 		}
-		fmt.Printf("Database initialized successfully at %s\n", config.DBPath)
-	} else {
-		fmt.Printf("Using existing database at %s\n", config.DBPath)
 	}
-
 	return db, nil
 }
 
@@ -72,7 +83,7 @@ func ResetDatabase(config DBConfig) error {
 	// Drop all tables
 	dropQueries := []string{
 		"DROP TABLE IF EXISTS user_answers",
-		"DROP TABLE IF EXISTS questions", 
+		"DROP TABLE IF EXISTS questions",
 		"DROP TABLE IF EXISTS quizzes",
 		"DROP TABLE IF EXISTS question_types",
 	}
@@ -140,13 +151,6 @@ func CreateQuestion(db *sql.DB, quizID int64, questionTypeID int, questionText, 
 	return result.LastInsertId()
 }
 
-// RecordUserAnswer records a user's answer to a question
-func RecordUserAnswer(db *sql.DB, questionID int64, userAnswer string, isCorrect bool) error {
-	query := `INSERT INTO user_answers (question_id, user_answer, is_correct) VALUES (?, ?, ?)`
-	_, err := db.Exec(query, questionID, userAnswer, isCorrect)
-	return err
-}
-
 // QuizStats holds statistics for a specific quiz/course
 type QuizStats struct {
 	CourseUUID      string
@@ -156,8 +160,8 @@ type QuizStats struct {
 	CorrectnessRate float64
 }
 
-// GetQuizStats retrieves statistics for all quizzes
-func GetQuizStats(db *sql.DB) ([]QuizStats, error) {
+// GetQuizzesStats retrieves statistics for all quizzes
+func GetQuizzesStats(db *sql.DB) ([]QuizStats, error) {
 	query := `
 		SELECT 
 			qz.course_uuid,
@@ -195,6 +199,34 @@ func GetQuizStats(db *sql.DB) ([]QuizStats, error) {
 	return stats, nil
 }
 
+func GetQuizStats(db *sql.DB, courseUUID string) (*QuizStats, error) {
+	if db == nil {
+		db = getDefaultDB()
+	}
+	defer db.Close()
+
+	query := `
+		SELECT 
+			qz.course_uuid,
+			COUNT(DISTINCT q.id) as question_count,
+			COUNT(ua.id) as total_answers,
+			SUM(CASE WHEN ua.is_correct = 1 THEN 1 ELSE 0 END) as correct_answers
+		FROM quizzes qz
+		LEFT JOIN questions q ON qz.id = q.quiz_id
+		LEFT JOIN user_answers ua ON q.id = ua.question_id
+		WHERE qz.course_uuid = ?
+	`
+
+	var stats QuizStats
+
+	err := db.QueryRow(query, courseUUID).Scan(&stats.CourseUUID, &stats.QuestionCount, &stats.TotalAnswers, &stats.CorrectAnswers)
+	if err != nil {
+		return nil, fmt.Errorf("error querying quiz stats: %w", err)
+	}
+
+	return &stats, nil
+}
+
 // Question represents a quiz question
 type Question struct {
 	ID            int64
@@ -206,8 +238,36 @@ type Question struct {
 	CorrectAnswer string
 }
 
-// GetNextMultipleChoiceQuestion gets the next unanswered multiple choice question for a course
-func GetNextMultipleChoiceQuestion(db *sql.DB, courseUUID string) (*Question, error) {
+func shuffle[T any](target []T) {
+	rand.Shuffle(len(target), func(i, j int) {
+		target[i], target[j] = target[j], target[i]
+	})
+}
+
+func (q *Question) GetAnswerChoices() []string {
+	choices := []string{}
+	if q.QuestionType != "multiple_choice" {
+		return choices
+	} else {
+		json.Unmarshal([]byte(q.AnswerChoices), &choices)
+	}
+	return choices
+}
+
+func (q *Question) IsCorrectAnswer(answer string) bool {
+	return strings.TrimSpace(answer) == strings.TrimSpace(q.CorrectAnswer)
+}
+
+type Quiz struct {
+	CourseUUID string
+	Questions  []Question
+}
+
+func (q *Quiz) ShuffleQuestions() {
+	shuffle(q.Questions)
+}
+
+func GetQuiz(db *sql.DB, courseUUID string) (*Quiz, error) {
 	query := `
 		SELECT q.id, q.quiz_id, qt.name, q.question_text, q.explanation, q.answer_choices, q.correct_answer
 		FROM questions q
@@ -216,31 +276,51 @@ func GetNextMultipleChoiceQuestion(db *sql.DB, courseUUID string) (*Question, er
 		WHERE qz.course_uuid = ? 
 		  AND qt.name = 'multiple_choice'
 		  AND q.id NOT IN (
-			  SELECT question_id FROM user_answers WHERE question_id = q.id
+			  SELECT question_id FROM user_answers WHERE question_id = q.id AND is_correct = true
 		  )
 		ORDER BY q.id ASC
-		LIMIT 1
 	`
 
-	row := db.QueryRow(query, courseUUID)
-	
-	var question Question
-	err := row.Scan(
-		&question.ID,
-		&question.QuizID,
-		&question.QuestionType,
-		&question.QuestionText,
-		&question.Explanation,
-		&question.AnswerChoices,
-		&question.CorrectAnswer,
-	)
-	
-	if err == sql.ErrNoRows {
-		return nil, nil // No more questions
-	}
+	questions := []Question{}
+
+	rows, err := db.Query(query, courseUUID)
 	if err != nil {
-		return nil, fmt.Errorf("error getting next question: %w", err)
+		return nil, fmt.Errorf("error getting quiz: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var question Question
+		err := rows.Scan(
+			&question.ID,
+			&question.QuizID,
+			&question.QuestionType,
+			&question.QuestionText,
+			&question.Explanation,
+			&question.AnswerChoices,
+			&question.CorrectAnswer,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("error getting a quiz question: %w", err)
+		}
+		questions = append(questions, question)
 	}
 
-	return &question, nil
+	return &Quiz{CourseUUID: courseUUID, Questions: questions}, nil
+}
+
+func MarkQuestionAnswered(db *sql.DB, questionId int, answer string, isCorrect bool) error {
+	stmt := `
+	insert into user_answers(question_id, user_answer, is_correct) values (?, ?, ?) 
+	`
+
+	if db == nil {
+		db = getDefaultDB()
+	}
+	defer db.Close()
+	_, err := db.Exec(stmt, questionId, answer, isCorrect)
+	if err != nil {
+		panic(fmt.Sprintf("%w", questionId, err))
+	}
+	return err
 }

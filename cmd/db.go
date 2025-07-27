@@ -65,7 +65,7 @@ func showDatabaseStats() {
 	}
 	defer db.Close()
 
-	stats, err := dao.GetQuizStats(db)
+	stats, err := dao.GetQuizzesStats(db)
 	if err != nil {
 		fmt.Printf("Error retrieving database stats: %v\n", err)
 		return
