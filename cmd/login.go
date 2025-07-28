@@ -136,7 +136,19 @@ var loginCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("Logged in successfully!")
+		user, err := api.GetUserInfo()
+		if err != nil {
+			return err
+		}
+		viper.Set("user_id", user.UUID)
+		viper.Set("user_handle", user.Handle)
+
+		err = viper.WriteConfig()
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%s Logged in successfully!", viper.Get("user_handle"))
 		return nil
 	},
 }
@@ -148,6 +160,7 @@ func cors(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
 func startHTTPServer(inputChan chan string) {
 	handleSubmit := func(res http.ResponseWriter, req *http.Request) {
 		code, err := io.ReadAll(req.Body)
